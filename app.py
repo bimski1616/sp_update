@@ -59,7 +59,7 @@ if file_master:
 
     # Konfigurasi sesuai logic asli (HANYA POINT > 0)
     configs = [
-        (up_ioh, 'Sitelist', 'Group Name', 'Period SP', 'TL Swap/Integ', 'Points', 'IOH'),
+        (up_ioh, 'Sitelist', 'Group Name', 'Period SP', 'TL Installation', 'Points', 'IOH'),
         (up_tsel, 'Site List', 'Group Name', 'Period', 'User Account', 'Points', 'TSEL'),
         (up_xls, 'Sheet2', 'Group Name', 'Period', 'User Account', 'Total Points', 'XLS')
     ]
@@ -89,18 +89,110 @@ if file_master:
     df_target = pd.read_excel(file_master)
     temp_key = df_target['Uniq_ID'].apply(super_clean) + "|" + df_target['User Account'].apply(super_clean)
     
-    # Update Status & Source
-    df_target['Update Status'] = temp_key.apply(lambda x: "Updated" if x in point_mapping else "No Match/Zero")
-    df_target['Update Source'] = temp_key.map(source_mapping).fillna("-")
+    # --- DETEKSI BARIS BARU BERDASARKAN GROUP NAME ---
+    new_rows_by_group = {}
+    temp_key_set = set(temp_key.values)  # Convert ke set untuk efficient lookup
+    
+    for uploaded_file, sheet, g_col, p_col, u_col, pt_col, label in configs:
+        if uploaded_file:
+            try:
+                df_src = pd.read_excel(uploaded_file, sheet_name=sheet)
+                df_src.columns = [str(c).strip() for c in df_src.columns]
+                
+                for _, row in df_src.iterrows():
+                    combo_key = (super_clean(row[g_col]) + "-" + 
+                                clean_period_final(row[p_col]) + "|" + 
+                                super_clean(row[u_col]))
+                    
+                    points_clean = convert_points_der(row[pt_col])
+                    
+                    if points_clean > 0 and combo_key not in temp_key_set:
+                        group_clean = super_clean(row[g_col])
+                        period_clean = clean_period_final(row[p_col])
+                        if group_clean not in new_rows_by_group:
+                            new_rows_by_group[group_clean] = []
+                        # Store HANYA kolom penting dari source file
+                        new_row_data = {
+                            g_col: row[g_col],           # Group Name (dengan nama asli kolom)
+                            p_col: row[p_col],           # Period (dengan nama asli kolom)
+                            u_col: row[u_col],           # User Account (dengan nama asli kolom)
+                            pt_col: row[pt_col],         # Points asli (dengan nama asli kolom)
+                            # Tambah juga dengan nama standard untuk display
+                            'Group Name': row[g_col],
+                            'Period': row[p_col],
+                            'User Account': row[u_col],
+                            'Points': row[pt_col],
+                            'Period_Clean': period_clean,
+                            'Points_Clean': points_clean,
+                            'Source': label,
+                            'g_col': g_col,
+                            'u_col': u_col,
+                            'p_col': p_col
+                        }
+                        new_rows_by_group[group_clean].append(new_row_data)
+            except:
+                pass
+    
+    # --- AUTO ADD SEMUA BARIS BARU KE MASTER ---
+    if new_rows_by_group:
+        for group_name in new_rows_by_group.keys():
+            for new_row in new_rows_by_group[group_name]:
+                new_entry = {col: "" for col in df_target.columns}
+                
+                # Copy semua data dari source yang ada di master columns
+                for col in df_target.columns:
+                    if col in new_row:
+                        new_entry[col] = new_row[col]
+                
+                # Isi kolom penting yang perlu di-generate (OVERRIDE kolom yang sudah di-copy jika perlu)
+                g_col = new_row.get('g_col')
+                u_col = new_row.get('u_col')
+                p_col = new_row.get('p_col')
+                period_clean = new_row.get('Period_Clean', '')
+                points_clean = new_row.get('Points_Clean', 0)
+                
+                # Gunakan periode yang sudah di-clean
+                if 'Period' in df_target.columns:
+                    new_entry['Period'] = period_clean
+                
+                if g_col:
+                    new_entry['Group Name'] = new_row[g_col]
+                    # Uniq_ID 1: Group Name + Period
+                    new_entry['Uniq_ID'] = super_clean(new_row[g_col]) + "-" + period_clean
+                
+                if u_col:
+                    new_entry['User Account'] = new_row[u_col]
+                    # Uniq_ID 2: User Account + Period (sesuai format di Master, tidak uppercase)
+                    new_entry['Uniq_ID 2'] = new_row[u_col] + period_clean
+                
+                # Gunakan Points yang sudah di-clean dan di-convert
+                new_entry['Total Points (VEB)'] = points_clean
+                new_entry['Update Status'] = "Added (New Row)"
+                new_entry['Update Source'] = new_row.get('Source', '')
+                
+                df_target = pd.concat([df_target, pd.DataFrame([new_entry])], ignore_index=True)
+    
+    # Inisialisasi kolom Update Status dan Update Source jika belum ada (untuk baris lama)
+    if 'Update Status' not in df_target.columns:
+        df_target['Update Status'] = ""
+    if 'Update Source' not in df_target.columns:
+        df_target['Update Source'] = "-"
+    
+    # Update Status & Source (SKIP baris baru yang sudah punya status)
+    mask_old = df_target['Update Status'] != "Added (New Row)"
+    df_target.loc[mask_old, 'Update Status'] = temp_key[mask_old].apply(lambda x: "Updated" if x in point_mapping else "No Match/Zero")
+    df_target.loc[mask_old, 'Update Source'] = temp_key[mask_old].map(source_mapping).fillna("-")
     
     # Update Points (Hanya update kalo ada di mapping, kalo ngga tetep pake nilai asli)
-    df_target['Total Points (VEB)'] = temp_key.map(point_mapping).fillna(df_target['Total Points (VEB)'])
+    # SKIP untuk baris baru (Added New Row) agar points tidak ter-override
+    mask_not_new = df_target['Update Status'] != "Added (New Row)"
+    df_target.loc[mask_not_new, 'Total Points (VEB)'] = temp_key[mask_not_new].map(point_mapping).fillna(df_target.loc[mask_not_new, 'Total Points (VEB)'])
 
     # --- SIDEBAR ADDITIONAL FILTERS ---
-    status_options = ["ALL"] + sorted(df_target['Update Status'].unique())
+    status_options = ["ALL"] + sorted(df_target['Update Status'].fillna("").unique().astype(str))
     selected_status = st.sidebar.selectbox("Filter Status", status_options)
 
-    source_options = ["ALL"] + sorted(df_target['Update Source'].unique())
+    source_options = ["ALL"] + sorted(df_target['Update Source'].fillna("-").unique().astype(str))
     selected_source = st.sidebar.selectbox("Filter Source", source_options)
 
     # --- APLIKASI FILTER KE PREVIEW ---
@@ -124,6 +216,22 @@ if file_master:
     st.divider()
     st.subheader(f"3. Preview Update ({len(df_display)} rows)")
     st.dataframe(df_display, use_container_width=True)
+
+    # --- SECTION BARIS BARU PER GROUP NAME ---
+    st.divider()
+    if new_rows_by_group:
+        total_new_rows = sum(len(rows) for rows in new_rows_by_group.values())
+        st.success(f"✅ {total_new_rows} baris baru SUDAH DITAMBAHKAN ke Master dari {len(new_rows_by_group)} group!")
+        st.subheader("📌 Detail Baris Baru yang Ditambahkan")
+        
+        with st.expander("Lihat Baris Baru", expanded=False):
+            for group_name in sorted(new_rows_by_group.keys()):
+                st.write(f"**Group: {group_name}** ({len(new_rows_by_group[group_name])} rows)")
+                df_new = pd.DataFrame(new_rows_by_group[group_name])
+                st.dataframe(df_new[['Group Name', 'Period', 'User Account', 'Points', 'Source']], use_container_width=True)
+                st.divider()
+    else:
+        st.info("ℹ️ Tidak ada baris baru terdeteksi. Semua data update sudah ada di Master.")
 
     # --- DOWNLOAD SECTION ---
     st.divider()
